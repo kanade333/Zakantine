@@ -132,6 +132,12 @@ public:
 
     void Finish();
 
+    /// Makes device writes visible to host reads of mapped memory: a barrier to HOST_READ.
+    void HostReadBarrier();
+
+    /// HostReadBarrier, then Finish: before the host reads what the GPU just copied.
+    void FinishForHostRead();
+
     u64 GetDeviceLocalMemory() const;
 
     u64 GetDeviceMemoryUsage() const;

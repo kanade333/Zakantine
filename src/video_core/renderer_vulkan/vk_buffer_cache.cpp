@@ -553,6 +553,27 @@ void BufferCacheRuntime::PreCopyBarrier() {
     });
 }
 
+void BufferCacheRuntime::HostReadBarrier() {
+    // Waiting for the work is not enough for the host to see it: Vulkan needs the writes made
+    // available to HOST_READ (zortos293/Lichii b06d1818ee, host-read visibility).
+    static constexpr VkMemoryBarrier HOST_READ_BARRIER{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+    };
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                               HOST_READ_BARRIER);
+    });
+}
+
+void BufferCacheRuntime::FinishForHostRead() {
+    HostReadBarrier();
+    Finish();
+}
+
 void BufferCacheRuntime::PostCopyBarrier() {
     static constexpr VkMemoryBarrier WRITE_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,

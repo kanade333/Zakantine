@@ -386,7 +386,7 @@ void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>>
         buffer.MarkUsage(download.copy.src_offset, download.copy.size);
         runtime.CopyBuffer(download_staging.buffer, buffer, std::span{&download.copy, 1}, true);
     }
-    runtime.Finish();
+    FinishForHostRead();
     const u8* const mapped_memory = download_staging.mapped_span.data();
     for (const Download& download : downloads) {
         const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
@@ -466,7 +466,7 @@ void BufferCache<P>::DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>>
                 buffer.MarkUsage(download.copy.src_offset, download.copy.size);
                 runtime.CopyBuffer(staging.buffer, buffer, std::span{&download.copy, 1}, true);
             }
-            runtime.Finish();
+            FinishForHostRead();
             for (const Download& download : staged) {
                 device_memory.WriteBlockUnsafe(
                     slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset,
@@ -1062,6 +1062,10 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         normalized_copies.push_back(second_copy);
     }
     runtime.PostCopyBarrier();
+    // Read back by the host when this fence pops (PopAsyncBuffers).
+    if constexpr (requires { runtime.HostReadBarrier(); }) {
+        runtime.HostReadBarrier();
+    }
     pending_downloads.emplace_back(std::move(normalized_copies));
     pending_download_ranges.emplace_back(std::move(download_ranges));
     async_buffers.emplace_back(download_staging);
@@ -2767,7 +2771,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
         buffer.MarkUsage(download.copy.src_offset, download.copy.size);
         runtime.CopyBuffer(download_staging.buffer, buffer, std::span{&download.copy, 1}, true);
     }
-    runtime.Finish();
+    FinishForHostRead();
     const u8* const mapped_memory = download_staging.mapped_span.data();
     for (const Download& download : downloads) {
         const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
@@ -2810,7 +2814,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
     if constexpr (requires { buffer.Mapped(); }) {
         if (const auto mapped = buffer.Mapped(); !mapped.empty()) {
-            runtime.Wait(buffer.LastUsageTick());
+            FinishForHostRead();
             for (const BufferCopy& copy : copies) {
                 device_memory.WriteBlockUnsafe(buffer.CpuAddr() + copy.src_offset,
                                                mapped.data() + copy.src_offset, copy.size);
@@ -2828,7 +2832,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             buffer.MarkUsage(copy.src_offset, copy.size);
         }
         runtime.CopyBuffer(download_staging.buffer, buffer, copies_span, true);
-        runtime.Finish();
+        FinishForHostRead();
         for (const BufferCopy& copy : copies) {
             const DAddr copy_device_addr = buffer.CpuAddr() + copy.src_offset;
             // Undo the modified offset

@@ -1197,7 +1197,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                     used_pipelines_filename}}) {
         std::error_code error;
         if (!std::filesystem::exists(own, error) && std::filesystem::exists(shared, error)) {
-            std::filesystem::copy_file(shared, own, error);
+            // Through a temporary file renamed once complete: a copy cut short (crash, closed
+            // window) must not leave a partial file that later boots take as this fork's cache
+            // (zortos293/Lichii b06d1818ee, interrupted-migration correction).
+            auto temporary = own;
+            temporary += ".migrating";
+            std::filesystem::copy_file(shared, temporary,
+                                       std::filesystem::copy_options::overwrite_existing, error);
+            if (!error) {
+                std::filesystem::rename(temporary, own, error);
+            }
+            if (error) {
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
+            }
             LOG_INFO(Render_Vulkan, "Copied pipeline cache {} to {}{}",
                      Common::FS::PathToUTF8String(shared), Common::FS::PathToUTF8String(own),
                      error ? fmt::format(" (failed: {})", error.message()) : std::string{});

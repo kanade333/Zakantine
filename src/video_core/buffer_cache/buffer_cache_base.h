@@ -540,6 +540,15 @@ private:
 
     void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false);
 
+    /// Waits for the GPU and makes its writes visible to host reads of mapped memory.
+    void FinishForHostRead() {
+        if constexpr (requires { runtime.FinishForHostRead(); }) {
+            runtime.FinishForHostRead();
+        } else {
+            runtime.Finish();
+        }
+    }
+
     /// Counts a GPU write to the command list pages in the range (invalidating their copies) and,
     /// while collecting, asks for new copies.
     void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size);
