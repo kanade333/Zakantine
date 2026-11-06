@@ -420,6 +420,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const Shader::Info& info{stage_infos[stage]};
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
         if constexpr (Spec::has_storage_buffers) {
+            Profile::Scope storage_scope{Profile::Zone::StorageBinds};
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
@@ -433,6 +434,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
+                Profile::Scope program_scope{Profile::Zone::HandlePrograms};
                 const auto evaluate{[&](u64 storage_alignment) {
                     return VideoCommon::EvaluateTextureHandle(
                         info, desc.handle_program, *gpu_memory,
@@ -462,6 +464,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 }
                 return TexturePair(raw, via_header_index);
             }
+            Profile::Scope read_scope{Profile::Zone::HandleReads};
             ASSERT(cbufs[desc.cbuf_index].enabled);
             const u32 index_offset{index << desc.size_shift};
             const u32 offset{desc.cbuf_offset + index_offset};
@@ -507,6 +510,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
 
+                Profile::Scope sampler_scope{Profile::Zone::SamplerIds};
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
             }
