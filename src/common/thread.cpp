@@ -581,7 +581,7 @@ void SetCurrentThreadToAllCores() {
 
 #ifdef _WIN32
 namespace {
-// EDEN_NX2_PIN_THREADS=1: the GPU threads (front and split back), the core timing thread and the
+// On by default (EDEN_NX2_PIN_THREADS=0 turns it off): the GPU threads (front and split back), the core timing thread and the
 // Vulkan worker each get a physical core of their own, all on the same last-level cache (one
 // CCD), and the process's other threads stay off those cores. The front and back hand each
 // other ring entries all the time, and the front and the timer spin while they wait: left to
@@ -595,7 +595,7 @@ const PinLayout& GetPinLayout() {
     static const PinLayout layout = [] {
         PinLayout result;
         const char* value = std::getenv("EDEN_NX2_PIN_THREADS");
-        if (value == nullptr || value[0] != '1') {
+        if (value != nullptr && value[0] == '0') {
             return result;
         }
         const HANDLE process = GetCurrentProcess();
