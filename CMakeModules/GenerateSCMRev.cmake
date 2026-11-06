@@ -17,7 +17,7 @@ get_timestamp(BUILD_DATE)
 # Frizti fork releases are numbered Frizti v1, v2, ...: dist/frizti_version.txt holds the number.
 set(FRIZTI_VERSION_FILE "${CMAKE_SOURCE_DIR}/dist/frizti_version.txt")
 if (EXISTS "${FRIZTI_VERSION_FILE}")
-    file(STRINGS "${FRIZTI_VERSION_FILE}" FRIZTI_VERSION LIMIT_COUNT 1 REGEX "^[0-9]+$")
+    file(STRINGS "${FRIZTI_VERSION_FILE}" FRIZTI_VERSION LIMIT_COUNT 1 REGEX "^[0-9]+([.][0-9]+)*$")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FRIZTI_VERSION_FILE}")
     # The log names the commit: reconfigure when HEAD moves (commit, checkout, merge, revert).
     if (EXISTS "${CMAKE_SOURCE_DIR}/.git/logs/HEAD")
@@ -28,7 +28,7 @@ endif()
 # Zakantine (this fork of Frizti's Lichii) numbers its builds in dist/zakantine_version.txt.
 set(ZAKANTINE_VERSION_FILE "${CMAKE_SOURCE_DIR}/dist/zakantine_version.txt")
 if (EXISTS "${ZAKANTINE_VERSION_FILE}")
-    file(STRINGS "${ZAKANTINE_VERSION_FILE}" ZAKANTINE_VERSION LIMIT_COUNT 1 REGEX "^[0-9]+$")
+    file(STRINGS "${ZAKANTINE_VERSION_FILE}" ZAKANTINE_VERSION LIMIT_COUNT 1 REGEX "^[0-9]+([.][0-9]+)*$")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ZAKANTINE_VERSION_FILE}")
 endif()
 
