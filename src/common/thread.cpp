@@ -5,9 +5,13 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "common/adpf.h"
 #include "common/error.h"
@@ -570,6 +574,166 @@ void SetCurrentThreadToAllCores() {
 #if defined(__ANDROID__)
     ADPF::RemoveCurrentThread();
     SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
+#endif
+}
+
+#ifdef _WIN32
+namespace {
+// EDEN_NX2_PIN_THREADS=1: the GPU threads (front and split back), the core timing thread and the
+// Vulkan worker each get a physical core of their own, all on the same last-level cache (one
+// CCD), and the process's other threads stay off those cores. The front and back hand each
+// other ring entries all the time, and the front and the timer spin while they wait: left to
+// the scheduler they can land on different CCDs or share a core with the back.
+struct PinLayout {
+    std::array<ULONG, static_cast<size_t>(PinnedThread::Count)> cpu_sets{};
+    bool active{};
+};
+
+const PinLayout& GetPinLayout() {
+    static const PinLayout layout = [] {
+        PinLayout result;
+        const char* value = std::getenv("EDEN_NX2_PIN_THREADS");
+        if (value == nullptr || value[0] != '1') {
+            return result;
+        }
+        const HANDLE process = GetCurrentProcess();
+        ULONG length = 0;
+        GetSystemCpuSetInformation(nullptr, 0, &length, process, 0);
+        std::vector<u8> buffer(length);
+        if (length == 0 ||
+            !GetSystemCpuSetInformation(
+                reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()), length, &length,
+                process, 0)) {
+            LOG_WARNING(Common, "EDEN_NX2_PIN_THREADS: no CPU set information");
+            return result;
+        }
+        struct Cpu {
+            ULONG id;
+            u32 group;
+            u32 core;
+            u32 cache;
+            u32 scheduling_class;
+        };
+        std::vector<Cpu> cpus;
+        for (ULONG offset = 0; offset + sizeof(DWORD) * 2 <= length;) {
+            const auto* info =
+                reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
+            if (info->Size == 0) {
+                break;
+            }
+            if (info->Type == CpuSetInformation) {
+                cpus.push_back({info->CpuSet.Id, info->CpuSet.Group, info->CpuSet.CoreIndex,
+                                info->CpuSet.LastLevelCacheIndex, info->CpuSet.SchedulingClass});
+            }
+            offset += info->Size;
+        }
+        const auto core_key = [](const Cpu& cpu) { return (u64{cpu.group} << 32) | cpu.core; };
+        const auto cache_key = [](const Cpu& cpu) { return (u64{cpu.group} << 32) | cpu.cache; };
+
+        // The last-level cache with the most preferred cores (scheduling class), then the most
+        // cores, then the first.
+        struct CacheInfo {
+            u64 key;
+            u32 best_class;
+            std::vector<u64> cores;
+        };
+        std::vector<CacheInfo> caches;
+        for (const Cpu& cpu : cpus) {
+            auto it = std::ranges::find(caches, cache_key(cpu), &CacheInfo::key);
+            if (it == caches.end()) {
+                caches.push_back({cache_key(cpu), cpu.scheduling_class, {}});
+                it = caches.end() - 1;
+            }
+            it->best_class = (std::max)(it->best_class, cpu.scheduling_class);
+            if (std::ranges::find(it->cores, core_key(cpu)) == it->cores.end()) {
+                it->cores.push_back(core_key(cpu));
+            }
+        }
+        constexpr size_t needed = static_cast<size_t>(PinnedThread::Count);
+        size_t total_cores = 0;
+        for (const CacheInfo& cache : caches) {
+            total_cores += cache.cores.size();
+        }
+        const auto chosen =
+            std::ranges::max_element(caches, [](const CacheInfo& a, const CacheInfo& b) {
+                if (a.best_class != b.best_class) {
+                    return a.best_class < b.best_class;
+                }
+                return a.cores.size() < b.cores.size();
+            });
+        if (chosen == caches.end() || chosen->cores.size() < needed || total_cores <= needed) {
+            LOG_WARNING(Common, "EDEN_NX2_PIN_THREADS: not enough cores ({} in total)",
+                        total_cores);
+            return result;
+        }
+        // Preferred cores first: the best scheduling class among each core's logical processors.
+        std::vector<std::pair<u32, u64>> ranked;
+        for (const u64 core : chosen->cores) {
+            u32 best = 0;
+            for (const Cpu& cpu : cpus) {
+                if (core_key(cpu) == core) {
+                    best = (std::max)(best, cpu.scheduling_class);
+                }
+            }
+            ranked.emplace_back(best, core);
+        }
+        std::ranges::stable_sort(ranked,
+                                 [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        std::vector<u64> reserved;
+        for (size_t role = 0; role < needed; ++role) {
+            const u64 core = ranked[role].second;
+            reserved.push_back(core);
+            ULONG lowest = ~ULONG{0};
+            for (const Cpu& cpu : cpus) {
+                if (core_key(cpu) == core) {
+                    lowest = (std::min)(lowest, cpu.id);
+                }
+            }
+            result.cpu_sets[role] = lowest;
+        }
+        std::vector<ULONG> others;
+        for (const Cpu& cpu : cpus) {
+            if (std::ranges::find(reserved, core_key(cpu)) == reserved.end()) {
+                others.push_back(cpu.id);
+            }
+        }
+        if (!SetProcessDefaultCpuSets(process, others.data(), static_cast<ULONG>(others.size()))) {
+            LOG_WARNING(Common, "EDEN_NX2_PIN_THREADS: SetProcessDefaultCpuSets failed ({})",
+                        GetLastError());
+            return result;
+        }
+        LOG_INFO(Common,
+                 "EDEN_NX2_PIN_THREADS: GPU front on CPU set {}, GPU back {}, core timing {}, "
+                 "Vulkan worker {}; {} other logical processors for the rest",
+                 result.cpu_sets[0], result.cpu_sets[1], result.cpu_sets[2], result.cpu_sets[3],
+                 others.size());
+        result.active = true;
+        return result;
+    }();
+    return layout;
+}
+} // Anonymous namespace
+#endif
+
+void PinCurrentThread(PinnedThread thread) {
+#ifdef _WIN32
+    const PinLayout& layout = GetPinLayout();
+    if (!layout.active) {
+        return;
+    }
+    const ULONG id = layout.cpu_sets[static_cast<size_t>(thread)];
+    if (!SetThreadSelectedCpuSets(GetCurrentThread(), &id, 1)) {
+        LOG_WARNING(Common, "EDEN_NX2_PIN_THREADS: could not pin thread {} ({})",
+                    static_cast<u32>(thread), GetLastError());
+        return;
+    }
+    static constexpr std::array<const char*, static_cast<size_t>(PinnedThread::Count)> names{
+        "GPU front", "GPU back", "core timing", "Vulkan worker"};
+    LOG_INFO(Common, "EDEN_NX2_PIN_THREADS: {} pinned to CPU set {}",
+             names[static_cast<size_t>(thread)], id);
+#else
+    (void)thread;
 #endif
 }
 

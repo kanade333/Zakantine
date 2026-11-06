@@ -75,6 +75,7 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
             Common::SetCurrentThreadName("HostTiming");
             Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
             Common::SetCurrentThreadToPerformanceCores();
+            Common::PinCurrentThread(Common::PinnedThread::CoreTiming);
             on_thread_init();
             has_started = true;
 

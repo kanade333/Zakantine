@@ -112,6 +112,16 @@ void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();
 
+/// Threads that EDEN_NX2_PIN_THREADS=1 gives a physical core of their own (Windows only).
+enum class PinnedThread : u32 {
+    GpuFront,
+    GpuBack,
+    CoreTiming,
+    VulkanWorker,
+    Count,
+};
+void PinCurrentThread(PinnedThread thread);
+
 void RefreshThreadPolicies();
 void PollThreadPolicies();
 
