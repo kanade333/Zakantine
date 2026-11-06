@@ -637,8 +637,76 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     VideoCommon::Nx2Profile::Scope miss_scope{same_key
                                                   ? VideoCommon::Nx2Profile::Zone::ContinuousRangeStale
                                                   : VideoCommon::Nx2Profile::Zone::ContinuousRangeMiss};
-    const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
+    const size_t result = MaxContinuousRangeFromPage(gpu_addr, size, serial);
     entry = {unique_identifier + 1, gpu_addr, size, serial, result};
+    return result;
+}
+
+size_t MemoryManager::MaxContinuousRangeFromPage(GPUVAddr gpu_addr, size_t size,
+                                                 u64 serial) const {
+    // Most misses above are distinct addresses inside the same pools (each draw binds its own
+    // offset). For an address in a big page mapped whole, the walk from the address gives the
+    // walk from the page start minus the offset: the first page is one device range either
+    // way and the walk goes on from the same next page. So the run from each page start is
+    // kept per thread instead (until the page table changes), and reused while it either
+    // ended before its cap or its cap covers the request.
+    // EDEN_NX2_RANGE_PAGE_MEMO=0 walks every time; EDEN_NX2_RANGE_CHECK=1 compares both.
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_RANGE_PAGE_MEMO");
+        return value == nullptr || value[0] != '0';
+    }();
+    static const bool check = [] {
+        const char* value = std::getenv("EDEN_NX2_RANGE_CHECK");
+        return value != nullptr && value[0] == '1';
+    }();
+    const auto walk = [this](GPUVAddr addr, size_t length) {
+        VideoCommon::Nx2Profile::Scope walk_scope{VideoCommon::Nx2Profile::Zone::ContinuousRangeWalk};
+        return MaxContinuousRangeUncached(addr, length);
+    };
+    if (!enabled || size == 0 || !IsWithinGPUAddressRange(gpu_addr) ||
+        size > address_space_size - gpu_addr || GetEntry(gpu_addr, true) != EntryType::Mapped) {
+        return walk(gpu_addr, size);
+    }
+    const GPUVAddr page_start = gpu_addr & ~static_cast<GPUVAddr>(big_page_mask);
+    const size_t offset = static_cast<size_t>(gpu_addr - page_start);
+    struct PageEntry {
+        size_t owner;
+        GPUVAddr page_start;
+        u64 serial;
+        size_t cap;
+        size_t run;
+    };
+    thread_local std::array<PageEntry, 1024> pages{};
+    PageEntry& page = pages[((page_start >> big_page_bits) * 0x9E3779B97F4A7C15ULL) >> 54];
+    if (page.owner != unique_identifier + 1 || page.page_start != page_start ||
+        page.serial != serial || (page.run >= page.cap && offset + size > page.cap)) {
+        // Native bindings ask for up to 8 MiB: one walk covers every offset of the page.
+        const size_t wanted = (std::max)(offset + size, (size_t{8} << 20) + big_page_size);
+        const size_t cap = (std::min)(wanted, static_cast<size_t>(address_space_size - page_start));
+        page = {unique_identifier + 1, page_start, serial, cap, walk(page_start, cap)};
+    }
+    if (page.run <= offset) {
+        return walk(gpu_addr, size);
+    }
+    const size_t result = (std::min)(size, page.run - offset);
+    if (check) {
+        const size_t direct = MaxContinuousRangeUncached(gpu_addr, size);
+        static std::atomic<u64> mismatches{};
+        if (direct != result) {
+            if (mismatches.fetch_add(1) < 16) {
+                LOG_ERROR(HW_GPU,
+                          "MaxContinuousRange page memo mismatch at {:#x} size {:#x}: {:#x} vs "
+                          "walk {:#x} (page run {:#x}, cap {:#x})",
+                          gpu_addr, size, result, direct, page.run, page.cap);
+            }
+            return direct;
+        }
+        static std::atomic<u64> checked{};
+        if (const u64 n = checked.fetch_add(1) + 1; (n & (n - 1)) == 0 && n >= 1024) {
+            LOG_INFO(HW_GPU, "MaxContinuousRange page memo: {} answers checked, {} mismatches", n,
+                     mismatches.load());
+        }
+    }
     return result;
 }
 

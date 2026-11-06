@@ -63,6 +63,7 @@ enum class Zone : u32 {
     SsboBinding,    ///< Inside StorageBinds: one storage buffer binding (StorageBufferBinding)
     ContinuousRangeMiss, ///< MaxContinuousRange answers not in its per-thread cache
     ContinuousRangeStale, ///< MaxContinuousRange answers cached before a page table change
+    ContinuousRangeWalk, ///< MaxContinuousRange page table walks (cache and page memo missed)
     Count,
 };
 
@@ -76,7 +77,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "fence skipped", "method", "split drain", "split wait",
     "writer wait", "list submit wait", "list GPU wait", "storage binds",
     "handle programs", "handle reads", "sampler ids", "ssbo binding",
-    "continuous range miss", "continuous range stale",
+    "continuous range miss", "continuous range stale", "continuous range walk",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).

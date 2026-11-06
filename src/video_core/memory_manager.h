@@ -183,6 +183,7 @@ private:
     inline void MemoryOperation(GPUVAddr gpu_src_addr, std::size_t size, bool is_big_page, FuncMapped&& func_mapped, FuncReserved&& func_reserved, FuncUnmapped&& func_unmapped) const;
 
     size_t MaxContinuousRangeUncached(GPUVAddr gpu_addr, size_t size) const;
+    size_t MaxContinuousRangeFromPage(GPUVAddr gpu_addr, size_t size, u64 serial) const;
 
     void ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe) const;
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
