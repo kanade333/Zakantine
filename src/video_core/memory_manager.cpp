@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -671,8 +672,38 @@ size_t MemoryManager::MaxContinuousRangeUncached(GPUVAddr gpu_addr, size_t size)
 }
 
 size_t MemoryManager::GetMemoryLayoutSize(GPUVAddr gpu_addr, size_t max_size) const {
-    std::unique_lock<std::mutex> lock(guard);
-    return kind_map.GetContinuousSizeFrom(gpu_addr);
+    // Asked for every storage buffer a draw binds (~40,000 times a second in Ocarina of Time's
+    // open areas, under the guard each time). The kind map only changes where map_serial is
+    // bumped, so answers are kept per thread as in MaxContinuousRange.
+    // EDEN_NX2_LAYOUT_SIZE_CACHE=0 asks the kind map every time.
+    static const bool cached = [] {
+        const char* value = std::getenv("EDEN_NX2_LAYOUT_SIZE_CACHE");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!cached) {
+        std::unique_lock<std::mutex> lock(guard);
+        return kind_map.GetContinuousSizeFrom(gpu_addr);
+    }
+    struct Entry {
+        size_t owner;
+        GPUVAddr gpu_addr;
+        u64 serial;
+        size_t result;
+    };
+    thread_local std::array<Entry, 64> cache{};
+    const u64 serial = map_serial.load(std::memory_order_acquire);
+    Entry& entry = cache[(gpu_addr * 0x9E3779B97F4A7C15ULL) >> 58];
+    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr &&
+        entry.serial == serial) {
+        return entry.result;
+    }
+    size_t result;
+    {
+        std::unique_lock<std::mutex> lock(guard);
+        result = kind_map.GetContinuousSizeFrom(gpu_addr);
+    }
+    entry = {unique_identifier + 1, gpu_addr, serial, result};
+    return result;
 }
 
 void MemoryManager::InvalidateRegion(GPUVAddr gpu_addr, size_t size,
