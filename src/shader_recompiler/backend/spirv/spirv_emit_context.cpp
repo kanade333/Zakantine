@@ -955,6 +955,8 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
     write_storage_cas_loop_func = func;
 }
 
+/// Defines the functions that route global memory accesses and atomics to the storage buffer
+/// holding the address at run time.
 void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     const Info& info{program.info};
     if (!info.uses_global_memory || !profile.support_int64) {
@@ -1139,6 +1141,28 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                                           : OpAtomicUMax(U32[1], pointer, scope, u32_zero_value, value));
                     });
         OpReturnValue(u32_zero_value);
+        OpFunctionEnd();
+    }
+    if (std::ranges::any_of(program.blocks, [](const IR::Block* block) {
+            return std::ranges::any_of(block->Instructions(), [](const IR::Inst& inst) {
+                return inst.GetOpcode() == IR::Opcode::GlobalAtomicCompareExchange32;
+            });
+        })) {
+        const Id function_type{TypeFunction(U32[1], U64, U32[1], U32[1])};
+        atomic_cas_global_func_u32 =
+            OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type);
+        const Id address{OpFunctionParameter(U64)};
+        const Id comparator{OpFunctionParameter(U32[1])};
+        const Id value{OpFunctionParameter(U32[1])};
+        const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+        define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
+                    [&](Id pointer) {
+                        OpReturnValue(OpAtomicCompareExchange(U32[1], pointer, scope,
+                                                              u32_zero_value, u32_zero_value,
+                                                              value, comparator));
+                    });
+        // No buffer matched: report success so a guest CAS retry loop cannot spin forever.
+        OpReturnValue(comparator);
         OpFunctionEnd();
     }
 }
@@ -1829,7 +1853,7 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     mesh_attribute_words = (std::max)(
         mesh_primitive_base + Common::DivCeil(mesh_info.max_primitives, 32U) * primitive_lines * 32,
         1U);
-    mesh_map_bytes = 4 + 3 * mesh_info.max_primitives;
+    mesh_map_bytes = 4 + mesh_info.PrimitiveVertices() * mesh_info.max_primitives;
     mesh_shared_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
     mesh_attributes = DefineVariable(*this, TypeArray(U32[1], Const(mesh_attribute_words)),
                                      std::nullopt, spv::StorageClass::Workgroup);
@@ -1843,11 +1867,20 @@ void EmitContext::DefineMesh(const IR::Program& program) {
 
     const Id vertex_count{Const(mesh_info.max_vertices)};
     const Id primitive_count{Const(mesh_info.max_primitives)};
-    mesh_primitive_indices =
-        DefineVariable(*this, TypeArray(U32[3], primitive_count),
-                       spv::BuiltIn::PrimitiveTriangleIndicesEXT, spv::StorageClass::Output);
+    const u32 primitive_vertices{mesh_info.PrimitiveVertices()};
+    mesh_primitive_indices = DefineVariable(
+        *this, TypeArray(U32[primitive_vertices], primitive_count),
+        primitive_vertices == 1   ? spv::BuiltIn::PrimitivePointIndicesEXT
+        : primitive_vertices == 2 ? spv::BuiltIn::PrimitiveLineIndicesEXT
+                                  : spv::BuiltIn::PrimitiveTriangleIndicesEXT,
+        spv::StorageClass::Output);
     std::array<Id, IR::NUM_GENERICS> generics[2]{};
-    Id point_size{}, primitive_layer{}, primitive_viewport{}, primitive_id_output{};
+    Id& point_size{mesh_point_size};
+    Id primitive_layer{}, primitive_viewport{}, primitive_id_output{};
+    if (primitive_vertices == 1) {
+        point_size = DefineVariable(*this, TypeArray(F32[1], vertex_count), spv::BuiltIn::PointSize,
+                                    spv::StorageClass::Output);
+    }
     const auto per_primitive_builtin = [&](Id& variable, spv::BuiltIn builtin) {
         if (!Sirit::ValidId(variable)) {
             variable = DefineVariable(*this, TypeArray(U32[1], primitive_count), builtin,
