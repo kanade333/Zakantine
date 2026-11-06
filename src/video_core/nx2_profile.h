@@ -62,6 +62,7 @@ enum class Zone : u32 {
     SamplerIds,     ///< Inside ReadHandles: sampler lookups
     SsboBinding,    ///< Inside StorageBinds: one storage buffer binding (StorageBufferBinding)
     ContinuousRangeMiss, ///< MaxContinuousRange answers not in its per-thread cache
+    ContinuousRangeStale, ///< MaxContinuousRange answers cached before a page table change
     Count,
 };
 
@@ -75,7 +76,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "fence skipped", "method", "split drain", "split wait",
     "writer wait", "list submit wait", "list GPU wait", "storage binds",
     "handle programs", "handle reads", "sampler ids", "ssbo binding",
-    "continuous range miss",
+    "continuous range miss", "continuous range stale",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
