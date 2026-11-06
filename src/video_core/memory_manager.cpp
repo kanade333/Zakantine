@@ -645,11 +645,12 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
 size_t MemoryManager::MaxContinuousRangeFromPage(GPUVAddr gpu_addr, size_t size,
                                                  u64 serial) const {
     // Most misses above are distinct addresses inside the same pools (each draw binds its own
-    // offset). For an address in a big page mapped whole, the walk from the address gives the
-    // walk from the page start minus the offset: the first page is one device range either
-    // way and the walk goes on from the same next page. So the run from each page start is
-    // kept per thread instead (until the page table changes), and reused while it either
-    // ended before its cap or its cap covers the request.
+    // offset). For an address in a mapped page (a big page mapped whole, or a small page of a
+    // big page mapped in small pages), the walk from the address gives the walk from the page
+    // start minus the offset: the first page is one device range either way and the walk goes
+    // on from the same next page. So the run from each page start is kept per thread instead
+    // (until the page table changes), and reused while it either ended before its cap or its
+    // cap covers the request. Ocarina of Time's pools are mapped in small pages.
     // EDEN_NX2_RANGE_PAGE_MEMO=0 walks every time; EDEN_NX2_RANGE_CHECK=1 compares both.
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_RANGE_PAGE_MEMO");
@@ -664,10 +665,21 @@ size_t MemoryManager::MaxContinuousRangeFromPage(GPUVAddr gpu_addr, size_t size,
         return MaxContinuousRangeUncached(addr, length);
     };
     if (!enabled || size == 0 || !IsWithinGPUAddressRange(gpu_addr) ||
-        size > address_space_size - gpu_addr || GetEntry(gpu_addr, true) != EntryType::Mapped) {
+        size > address_space_size - gpu_addr) {
         return walk(gpu_addr, size);
     }
-    const GPUVAddr page_start = gpu_addr & ~static_cast<GPUVAddr>(big_page_mask);
+    // The walk takes a big page whole when it is mapped, and goes through its small pages when
+    // it is free (MemoryOperation); a reserved big page or an unmapped small page ends it.
+    u64 granule_mask;
+    const EntryType big_entry = GetEntry(gpu_addr, true);
+    if (big_entry == EntryType::Mapped) {
+        granule_mask = big_page_mask;
+    } else if (big_entry == EntryType::Free && GetEntry(gpu_addr, false) == EntryType::Mapped) {
+        granule_mask = page_mask;
+    } else {
+        return walk(gpu_addr, size);
+    }
+    const GPUVAddr page_start = gpu_addr & ~static_cast<GPUVAddr>(granule_mask);
     const size_t offset = static_cast<size_t>(gpu_addr - page_start);
     struct PageEntry {
         size_t owner;
@@ -676,12 +688,12 @@ size_t MemoryManager::MaxContinuousRangeFromPage(GPUVAddr gpu_addr, size_t size,
         size_t cap;
         size_t run;
     };
-    thread_local std::array<PageEntry, 1024> pages{};
-    PageEntry& page = pages[((page_start >> big_page_bits) * 0x9E3779B97F4A7C15ULL) >> 54];
+    thread_local std::array<PageEntry, 8192> pages{};
+    PageEntry& page = pages[((page_start >> page_bits) * 0x9E3779B97F4A7C15ULL) >> 51];
     if (page.owner != unique_identifier + 1 || page.page_start != page_start ||
         page.serial != serial || (page.run >= page.cap && offset + size > page.cap)) {
         // Native bindings ask for up to 8 MiB: one walk covers every offset of the page.
-        const size_t wanted = (std::max)(offset + size, (size_t{8} << 20) + big_page_size);
+        const size_t wanted = (std::max)(offset + size, (size_t{8} << 20) + granule_mask + 1);
         const size_t cap = (std::min)(wanted, static_cast<size_t>(address_space_size - page_start));
         page = {unique_identifier + 1, page_start, serial, cap, walk(page_start, cap)};
     }
