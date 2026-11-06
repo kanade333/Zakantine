@@ -19,6 +19,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "video_core/texture_cache/util.h"
@@ -625,6 +626,7 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         entry.serial == serial) {
         return entry.result;
     }
+    VideoCommon::Nx2Profile::Scope miss_scope{VideoCommon::Nx2Profile::Zone::ContinuousRangeMiss};
     const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
     entry = {unique_identifier + 1, gpu_addr, size, serial, result};
     return result;

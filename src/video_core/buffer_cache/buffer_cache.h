@@ -597,11 +597,14 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
         }
         ssbo_addr = holder + indirect_offset;
     }
-    channel_state->storage_buffers[stage][ssbo_index] =
-        StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
-                             maxwell3d->GetNativeMacroEngine().native_turing ||
-                                 indirect_offset != ~0U,
-                             indirect_offset != ~0U);
+    {
+        Nx2Profile::Scope binding_scope{Nx2Profile::Zone::SsboBinding};
+        channel_state->storage_buffers[stage][ssbo_index] =
+            StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
+                                 maxwell3d->GetNativeMacroEngine().native_turing ||
+                                     indirect_offset != ~0U,
+                                 indirect_offset != ~0U);
+    }
     if (indirect_offset != ~0U) {
         TraceTablePointer(false, stage, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->storage_buffers[stage][ssbo_index]);
