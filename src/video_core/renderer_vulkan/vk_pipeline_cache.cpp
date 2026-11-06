@@ -666,6 +666,29 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+// Graphics pipelines unused for this many frames are destroyed. EDEN_NX2_PIPELINE_EVICT_FRAMES
+// overrides it; 0 never evicts.
+constexpr u64 DefaultEvictAfterFrames = 9000;
+
+u64 EvictAfterFrames() {
+    static const u64 frames = [] {
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_FRAMES");
+        if (value == nullptr || value[0] == '\0') {
+            return DefaultEvictAfterFrames;
+        }
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0') {
+            LOG_WARNING(Render_Vulkan, "Ignoring EDEN_NX2_PIPELINE_EVICT_FRAMES={}", value);
+            return DefaultEvictAfterFrames;
+        }
+        LOG_INFO(Render_Vulkan, "EDEN_NX2_PIPELINE_EVICT_FRAMES={}{}", parsed,
+                 parsed == 0 ? " (eviction off)" : "");
+        return static_cast<u64>(parsed);
+    }();
+    return frames;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -1053,11 +1076,11 @@ void PipelineCache::EvictUnusedPipelines() {
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
-    constexpr u64 EvictAfterFrames = 9000;
-    if (frame_count <= EvictAfterFrames) {
+    const u64 evict_after = EvictAfterFrames();
+    if (evict_after == 0 || frame_count <= evict_after) {
         return;
     }
-    const u64 cutoff = frame_count - EvictAfterFrames;
+    const u64 cutoff = frame_count - evict_after;
     const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
@@ -1083,7 +1106,7 @@ void PipelineCache::EvictUnusedPipelines() {
         }
     }
     LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+             evict_after, graphics_cache.size());
 }
 
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
