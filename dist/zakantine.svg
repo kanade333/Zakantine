@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="body" cx="36%" cy="32%" r="80%">
+      <stop offset="0%" stop-color="#FFE29A"/>
+      <stop offset="35%" stop-color="#FFB23F"/>
+      <stop offset="75%" stop-color="#FF8A1F"/>
+      <stop offset="100%" stop-color="#F2620E"/>
+    </radialGradient>
+    <radialGradient id="blush" cx="75%" cy="78%" r="55%">
+      <stop offset="0%" stop-color="#FF4F5E" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="#FF4F5E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="leaf" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3DB33A"/>
+      <stop offset="100%" stop-color="#9BEA55"/>
+    </linearGradient>
+    <linearGradient id="leaf2" x1="1" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#2E9E3A"/>
+      <stop offset="100%" stop-color="#7BD34A"/>
+    </linearGradient>
+    <linearGradient id="shade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="60%" stop-color="#B83C00" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#B83C00" stop-opacity="0.35"/>
+    </linearGradient>
+    <clipPath id="clipBody">
+      <path id="bodyPath" d="M256 160 C300 128 404 140 424 252 C444 366 352 456 256 456 C160 456 68 366 88 252 C108 140 212 128 256 160 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- ombre portée -->
+  <ellipse cx="256" cy="478" rx="130" ry="14" fill="#000" opacity="0.12"/>
+
+  <!-- feuille arrière -->
+  <path d="M250 128 C230 80 172 62 120 78 C128 132 190 160 250 128 Z" fill="url(#leaf2)"/>
+  <path d="M244 124 C214 108 176 96 140 88" stroke="#2A8A33" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.6"/>
+
+  <!-- corps -->
+  <use href="#bodyPath" fill="url(#body)"/>
+  <g clip-path="url(#clipBody)">
+    <rect width="512" height="512" fill="url(#blush)"/>
+    <rect width="512" height="512" fill="url(#shade)"/>
+    <!-- pli de l'abricot -->
+    <path d="M256 160 C316 236 322 352 268 462" stroke="#D9570B" stroke-width="14" stroke-linecap="round" fill="none" opacity="0.35"/>
+    <path d="M246 164 C306 240 312 352 258 462" stroke="#FFD58A" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.55"/>
+    <!-- fine texture duveteuse -->
+    <ellipse cx="256" cy="300" rx="170" ry="160" fill="none" stroke="#FFFFFF" stroke-width="3" opacity="0.10"/>
+  </g>
+
+  <!-- reflets glossy -->
+  <path d="M132 258 C128 204 160 164 206 152 C176 178 160 214 164 262 C166 292 176 318 190 336 C158 322 136 292 132 258 Z" fill="#FFFFFF" opacity="0.55"/>
+  <circle cx="214" cy="140" r="0" fill="#fff"/>
+  <ellipse cx="170" cy="368" rx="14" ry="8" fill="#FFFFFF" opacity="0.35" transform="rotate(-40 170 368)"/>
+
+  <!-- tige -->
+  <path d="M256 160 C258 140 262 124 270 108" stroke="#7A4A22" stroke-width="12" stroke-linecap="round" fill="none"/>
+  <path d="M256 160 C258 140 262 124 270 108" stroke="#A8703A" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.8"/>
+
+  <!-- feuille avant -->
+  <path d="M272 116 C282 56 350 28 424 48 C420 112 346 156 272 116 Z" fill="url(#leaf)"/>
+  <path d="M276 114 C320 92 366 70 406 56" stroke="#2A8A33" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.6"/>
+  <path d="M300 86 C330 70 360 60 392 56" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.35"/>
+</svg>
