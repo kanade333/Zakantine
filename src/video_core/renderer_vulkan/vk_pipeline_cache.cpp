@@ -17,6 +17,7 @@
 #include <vector>
 #include <bit>
 #include <numeric>
+#include <optional>
 #include "common/cityhash.h"
 #include "common/scope_exit.h"
 #include "common/fs/fs.h"
@@ -37,6 +38,7 @@
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/pipeline_eviction.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
@@ -667,28 +669,39 @@ bool PreloadAllPipelines() {
     return all;
 }
 
-// Graphics pipelines unused for this many frames are destroyed. EDEN_NX2_PIPELINE_EVICT_FRAMES
-// overrides it; 0 never evicts.
-constexpr u64 DefaultEvictAfterFrames = 9000;
-
-u64 EvictAfterFrames() {
-    static const u64 frames = [] {
-        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_FRAMES");
-        if (value == nullptr || value[0] == '\0') {
-            return DefaultEvictAfterFrames;
-        }
-        char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(value, &end, 10);
-        if (end == value || *end != '\0') {
-            LOG_WARNING(Render_Vulkan, "Ignoring EDEN_NX2_PIPELINE_EVICT_FRAMES={}", value);
-            return DefaultEvictAfterFrames;
-        }
-        LOG_INFO(Render_Vulkan, "EDEN_NX2_PIPELINE_EVICT_FRAMES={}{}", parsed,
-                 parsed == 0 ? " (eviction off)" : "");
-        return static_cast<u64>(parsed);
-    }();
-    return frames;
+std::optional<u64> ReadU64Env(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return std::nullopt;
+    }
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0') {
+        LOG_WARNING(Render_Vulkan, "Ignoring {}={}", name, value);
+        return std::nullopt;
+    }
+    return static_cast<u64>(parsed);
 }
+
+const EvictionPolicy& GetEvictionPolicy() {
+    static const EvictionPolicy policy = [] {
+        EvictionPolicy result;
+        if (const auto age = ReadU64Env("EDEN_NX2_PIPELINE_EVICT_FRAMES")) {
+            result.age = *age;
+            LOG_INFO(Render_Vulkan, "Pipeline eviction: unused for {} frames{}", *age,
+                     *age == 0 ? " (off)" : "");
+            return result;
+        }
+        if (const auto cap = ReadU64Env("EDEN_NX2_PIPELINE_CAP")) {
+            result.cap = *cap;
+        }
+        LOG_INFO(Render_Vulkan, "Pipeline eviction: above {} graphics pipelines{}", result.cap,
+                 result.cap == 0 ? " (off)" : "");
+        return result;
+    }();
+    return policy;
+}
+
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -1074,19 +1087,38 @@ void PipelineCache::EvictUnusedPipelines() {
         return;
     }
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
-    // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
-    const u64 evict_after = EvictAfterFrames();
-    if (evict_after == 0 || frame_count <= evict_after) {
+    // with every place a session went (title 1: 1,500 on its title screen alone). See
+    // EvictionPolicy for which are destroyed.
+    const EvictionPolicy& policy = GetEvictionPolicy();
+    const auto evictable = [this](const GraphicsPipeline* pipeline) {
+        return pipeline != nullptr && pipeline != current_pipeline && pipeline->IsBuilt();
+    };
+    std::vector<u64> last_uses;
+    if (!policy.age && policy.cap != 0 && graphics_cache.size() > policy.cap) {
+        last_uses.reserve(graphics_cache.size());
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (evictable(pipeline.get())) {
+                last_uses.push_back(pipeline->LastUse());
+            }
+        }
+    }
+    const std::optional<EvictionSelection> selection =
+        SelectEvictions(policy, frame_count, graphics_cache.size(), last_uses);
+    if (!selection) {
         return;
     }
-    const u64 cutoff = frame_count - evict_after;
     const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
+    size_t ties_left = selection->ties;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
         GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
+        bool evict = evictable(pipeline) && pipeline->LastUse() < selection->below;
+        if (!evict && ties_left != 0 && evictable(pipeline) &&
+            pipeline->LastUse() == selection->tie_frame) {
+            --ties_left;
+            evict = true;
+        }
+        if (!evict) {
             ++it;
             continue;
         }
@@ -1105,8 +1137,13 @@ void PipelineCache::EvictUnusedPipelines() {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             evict_after, graphics_cache.size());
+    if (policy.age) {
+        LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
+                 evicted, *policy.age, graphics_cache.size());
+    } else {
+        LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines over the cap of {}, {} left",
+                 evicted, policy.cap, graphics_cache.size());
+    }
 }
 
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
