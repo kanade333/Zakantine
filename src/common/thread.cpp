@@ -598,7 +598,6 @@ const PinLayout& GetPinLayout() {
         if (value != nullptr && value[0] == '0') {
             return result;
         }
-        const bool forced = value != nullptr && value[0] == '1';
         const HANDLE process = GetCurrentProcess();
         ULONG length = 0;
         GetSystemCpuSetInformation(nullptr, 0, &length, process, 0);
@@ -664,14 +663,6 @@ const PinLayout& GetPinLayout() {
                 }
                 return a.cores.size() < b.cores.size();
             });
-        // Four cores taken from a small CPU leave too few for the guest cores and the pipeline
-        // workers: only from 12 physical cores on, unless EDEN_NX2_PIN_THREADS=1 forces it.
-        constexpr size_t MinimumCores = 12;
-        if (!forced && total_cores < MinimumCores) {
-            LOG_INFO(Common, "EDEN_NX2_PIN_THREADS: {} physical cores, threads left unpinned",
-                     total_cores);
-            return result;
-        }
         if (chosen == caches.end() || chosen->cores.size() < needed || total_cores <= needed) {
             LOG_WARNING(Common, "EDEN_NX2_PIN_THREADS: not enough cores ({} in total)",
                         total_cores);
