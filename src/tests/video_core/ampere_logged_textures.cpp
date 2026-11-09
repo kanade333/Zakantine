@@ -2,7 +2,12 @@
 
 #include <array>
 #include <bit>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <catch2/catch_test_macros.hpp>
 
@@ -27,6 +32,7 @@ constexpr std::array<Instruction, 2> Gathers{{
 class TextureEnvironment final : public Shader::Environment {
 public:
     u32 binding{15};
+    bool integer_format{false};
     std::span<const u64> code;
 
     TextureEnvironment() { stage = Shader::Stage::Compute; }
@@ -45,7 +51,9 @@ public:
     Shader::TexturePixelFormat ReadTexturePixelFormat(u32) override {
         return Shader::TexturePixelFormat::A8B8G8R8_UNORM;
     }
-    bool IsTexturePixelFormatInteger(u32) override { return false; }
+    bool IsTexturePixelFormatInteger(u32) override {
+        return integer_format;
+    }
     u32 ReadViewportTransformState() override { return 1; }
     u32 TextureBoundBuffer() const override { return binding; }
     u32 LocalMemorySize() const override { return 0; }
@@ -245,6 +253,30 @@ TEST_CASE("Welcome Tour array depth samples preserve alternate descriptor banks"
     }
 }
 
+TEST_CASE("Depth-compare samples keep a float image when the descriptor reads as integer",
+          "[video_core][ampere][logged_textures]") {
+    // Ocarina of Time binds a garbage TIC (unknown format 33) to a TEX.DC; an integer sampled
+    // type made RADV's spirv_to_nir reject the module and crash.
+    const Instruction captured{{0x0a0d7b60, 0xb1012400, 0x041e41ff, 0x00114400}};
+    const auto lowered{Shader::Ampere::LowerToMaxwell(std::array{captured, Exit})};
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    TextureTranslation translated;
+    translated.env.binding = 4;
+    translated.env.integer_format = true;
+    translated.Translate(lowered, 7);
+    IR::Program program;
+    program.blocks = {&translated.block};
+    program.post_order_blocks = {&translated.block};
+    Shader::Optimization::SsaRewritePass(program);
+    Shader::HostTranslateInfo host;
+    host.ApplyDescriptorLimitPolicy();
+    Shader::Optimization::TexturePass(translated.env, program, host);
+    REQUIRE(program.info.texture_descriptors.size() == 1);
+    CHECK(program.info.texture_descriptors.front().is_depth);
+    CHECK_FALSE(program.info.texture_descriptors.front().is_integer);
+}
+
 TEST_CASE("Welcome Tour logged half fetch writes odd scalar destinations",
           "[video_core][ampere][logged_textures]") {
     for (const u32 guard : {1U, 7U, 9U}) {
@@ -269,6 +301,76 @@ TEST_CASE("Welcome Tour logged half fetch writes odd scalar destinations",
         for (u32 reg = 0; reg < 246; ++reg) {
             if (reg != 1 && reg != 5) {
                 REQUIRE(translated.registers[reg] == before[reg]);
+            }
+        }
+    }
+}
+
+TEST_CASE("Depth sampling emits float image and result types for integer descriptors",
+          "[video_core][spirv][depth_compare]") {
+    for (const bool depth : {false, true}) {
+        for (const bool integer : {false, true}) {
+            CAPTURE(depth, integer);
+            TextureEnvironment env;
+            env.integer_format = integer;
+            Shader::ObjectPool<IR::Inst> pool;
+            IR::Block block{pool};
+            IR::Program program;
+            program.stage = Shader::Stage::Fragment;
+            program.blocks = {&block};
+            program.post_order_blocks = {&block};
+            program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
+                                   {{}, IR::AbstractSyntaxNode::Type::Return}};
+            IR::IREmitter ir{block};
+            IR::TextureInstInfo flags{};
+            flags.type.Assign(Shader::TextureType::Color2D);
+            flags.is_depth.Assign(depth ? 1 : 0);
+            const auto coords = ir.CompositeConstruct(ir.Imm32(0.0f), ir.Imm32(0.0f));
+            const auto sample = depth
+                ? IR::Value{ir.ImageSampleDrefImplicitLod(ir.Imm32(0), coords, ir.Imm32(0.5f),
+                                                        {}, {}, {}, flags)}
+                : ir.ImageSampleExplicitLod(ir.Imm32(0), coords, ir.Imm32(0.0f), {}, flags);
+            Shader::HostTranslateInfo host;
+            host.ApplyDescriptorLimitPolicy();
+            Shader::Optimization::TexturePass(env, program, host);
+            REQUIRE(program.info.texture_descriptors.size() == 1);
+            CHECK(program.info.texture_descriptors[0].is_integer == (integer && !depth));
+            CHECK(sample.Inst()->Flags<IR::TextureInstInfo>().is_integer ==
+                  static_cast<u32>(integer && !depth));
+            Shader::Profile profile;
+            profile.supported_spirv = 0x00010500;
+            const auto code = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+            std::unordered_map<u32, u32> scalar_types;
+            u32 image_sampled_type{};
+            u32 dref_result_type{};
+            for (size_t offset = 5; offset < code.size();) {
+                const u32 size = code[offset] >> 16;
+                REQUIRE(size != 0);
+                REQUIRE(offset + size <= code.size());
+                const u32 opcode = code[offset] & 0xffffU;
+                if (opcode == 21 || opcode == 22) {
+                    scalar_types.emplace(code[offset + 1], opcode);
+                } else if (opcode == 25) {
+                    image_sampled_type = code[offset + 2];
+                    CHECK(code[offset + 4] == static_cast<u32>(depth));
+                } else if (opcode == 89) {
+                    dref_result_type = code[offset + 1];
+                }
+                offset += size;
+            }
+            REQUIRE(image_sampled_type != 0);
+            CHECK(scalar_types.at(image_sampled_type) == (integer && !depth ? 21 : 22));
+            if (depth) {
+                CHECK(dref_result_type == image_sampled_type);
+            }
+            if (const char* directory = std::getenv("EDEN_DEPTH_TEST_OUTPUT")) {
+                std::filesystem::create_directories(directory);
+                const auto name = std::string{depth ? "depth" : "color"} +
+                                  (integer ? "-integer" : "-float") + ".spv";
+                std::ofstream file{std::filesystem::path{directory} / name, std::ios::binary};
+                file.write(reinterpret_cast<const char*>(code.data()),
+                           static_cast<std::streamsize>(code.size() * sizeof(u32)));
+                REQUIRE(file.good());
             }
         }
     }
@@ -301,6 +403,55 @@ TEST_CASE("Welcome Tour logged half gathers round and pack both destination orde
                 }
             }
         }
+    }
+}
+
+TEST_CASE("Half gathers with fewer than four taps pack only the taps they have",
+          "[video_core][ampere][logged_textures]") {
+    struct Case {
+        u32 mask;
+        u32 second_dest;
+        u32 first;
+        std::optional<u32> second;
+    };
+    // sample {1.0, 1.0 + ulp, -0.0, 0.75}: the enabled taps pack low-high from R2, then R3.
+    for (const Case& c : {Case{1, 0xff, 0x00003c00, std::nullopt},
+                          Case{2, 0xff, 0x00003c01, std::nullopt},
+                          Case{3, 0xff, 0x3c013c00, std::nullopt},
+                          Case{12, 0xff, 0x3a008000, std::nullopt},
+                          Case{3, 0x03, 0x3c013c00, std::nullopt},
+                          Case{7, 0x03, 0x3c013c00, 0x00008000}}) {
+        INFO("mask " << c.mask << " second destination " << c.second_dest);
+        auto instruction{Gathers[0]};
+        instruction.words[2] = (instruction.words[2] & ~0xfffU) | (c.mask << 8) | c.second_dest;
+        const auto lowered{Shader::Ampere::LowerToMaxwell(std::array{instruction, Exit})};
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        TextureTranslation translated;
+        translated.registers.fill(0xdeadbeef);
+        translated.registers[6] = 0x3e000000;
+        translated.registers[7] = 0x3f400000;
+        translated.registers[255] = 0; // RZ: constant propagation folds its reads to zero
+        translated.sample = {0x3f801000, 0x3f801001, 0x80000000, 0x3f400000};
+        const auto before{translated.registers};
+        translated.Translate(lowered, 7);
+        translated.Run();
+        CHECK(translated.textures == 1);
+        CHECK(translated.registers[2] == c.first);
+        if (c.second) {
+            CHECK(translated.registers[c.second_dest] == *c.second);
+        }
+        for (u32 reg = 0; reg < 246; ++reg) {
+            if (reg != 2 && (!c.second || reg != c.second_dest)) {
+                REQUIRE(translated.registers[reg] == before[reg]);
+            }
+        }
+    }
+    // Three or four taps still need a second destination register.
+    for (const u32 mask : {7U, 15U}) {
+        auto instruction{Gathers[0]};
+        instruction.words[2] = (instruction.words[2] & ~0xfffU) | (mask << 8) | 0xff;
+        CHECK_FALSE(Shader::Ampere::LowerToMaxwell(std::array{instruction, Exit}));
     }
 }
 

@@ -19,6 +19,8 @@
 #include <deque>
 #include <fmt/core.h>
 
+#include "common/build_family.h"
+#include "common/scm_rev.h"
 #include "common/settings_enums.h"
 #include "common/assert.h"
 #include "common/fs/fs_util.h"
@@ -46,6 +48,7 @@ SETTING(std::string, false);
 SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
+SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -400,15 +403,20 @@ u32 FrameGenMultiplier() {
                       MAX_FRAME_GEN_MULTIPLIER);
 }
 
+bool FrameGenActive() {
+    static const bool fritchii = Common::IsFritchiiFamily();
+    return values.frame_gen.GetValue() && !fritchii;
+}
+
 size_t FrameGenGenerations() {
-    if (!values.frame_gen.GetValue()) {
+    if (!FrameGenActive()) {
         return 0;
     }
     return FrameGenMultiplier() - 1;
 }
 
 size_t FrameGenMaxGenerations() {
-    if (!values.frame_gen.GetValue()) {
+    if (!FrameGenActive()) {
         return 0;
     }
     if (values.frame_gen_target_rate.GetValue() != 0) {

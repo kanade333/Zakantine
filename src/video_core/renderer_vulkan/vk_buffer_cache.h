@@ -128,7 +128,8 @@ public:
     void Wait(u64 tick);
 
     /// Waits for a submitted tick without flushing: safe on threads other than the GPU thread.
-    void WaitSubmittedTick(u64 tick);
+    void WaitSubmittedTick(u64 tick, u64 writer = 0);
+    void WaitSubmittedTickImpl(u64 tick);
 
     void Finish();
 
@@ -147,6 +148,9 @@ public:
     u32 GetUniformBufferAlignment() const;
 
     u32 GetStorageBufferAlignment() const;
+
+    /// Largest range a storage buffer binding may have
+    u64 GetMaxStorageBufferRange() const;
 
     [[nodiscard]] StagingBufferRef UploadStagingBuffer(size_t size);
 

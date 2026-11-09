@@ -229,6 +229,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
 #endif
     X(vkGetQueryPoolResults);
     X(vkGetPipelineExecutablePropertiesKHR);
+    X(vkWaitForPresentKHR);
     X(vkGetPipelineExecutableStatisticsKHR);
     X(vkGetSemaphoreCounterValue);
     X(vkMapMemory);
@@ -315,6 +316,7 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
     X(vkDestroyDebugUtilsMessengerEXT);
     X(vkDestroyDebugReportCallbackEXT);
     X(vkDestroySurfaceKHR);
+    X(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR);
     X(vkGetPhysicalDeviceFeatures2);
     X(vkGetPhysicalDeviceFormatProperties2);
     X(vkGetPhysicalDeviceProperties2);
@@ -538,6 +540,15 @@ Image::MemoryBlock Image::GetMemoryBlock() const noexcept {
     }
     return {reinterpret_cast<u64>(info.allocationInfo.deviceMemory), info.blockSize,
             info.allocationInfo.size};
+}
+
+bool Image::IsDeviceLocal() const noexcept {
+    if (allocation == nullptr) {
+        return false;
+    }
+    VkMemoryPropertyFlags flags{};
+    vmaGetAllocationMemoryProperties(allocator, allocation, &flags);
+    return (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
 }
 
 void Buffer::Flush() const {
@@ -1003,6 +1014,29 @@ std::vector<VkPhysicalDeviceToolProperties> PhysicalDevice::GetPhysicalDeviceToo
     dld->vkGetPhysicalDeviceToolProperties(physical_device, &num, nullptr);
     std::vector<VkPhysicalDeviceToolProperties> properties(num);
     dld->vkGetPhysicalDeviceToolProperties(physical_device, &num, properties.data());
+    return properties;
+}
+
+std::vector<VkCooperativeMatrixPropertiesKHR> PhysicalDevice::GetCooperativeMatrixPropertiesKHR()
+    const {
+    if (!dld->vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR) {
+        return {};
+    }
+    u32 num = 0;
+    if (dld->vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physical_device, &num, nullptr) !=
+        VK_SUCCESS) {
+        return {};
+    }
+    std::vector<VkCooperativeMatrixPropertiesKHR> properties(
+        num, VkCooperativeMatrixPropertiesKHR{
+                 .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+                 .pNext = nullptr,
+             });
+    if (dld->vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physical_device, &num,
+                                                               properties.data()) != VK_SUCCESS) {
+        return {};
+    }
+    properties.resize(num);
     return properties;
 }
 

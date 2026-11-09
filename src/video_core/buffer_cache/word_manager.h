@@ -39,7 +39,7 @@ enum class Type {
 
 template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 struct WordManager {
-    using CollectedRanges = std::vector<std::pair<VAddr, u64>>;
+    using CollectedRanges = std::vector<std::pair<VAddr, size_t>>;
 
     static constexpr size_t num_words = Common::DivCeil(size_bytes, BYTES_PER_WORD);
     static_assert(num_words <= 64, "clean_words holds a bit per word");
@@ -231,6 +231,24 @@ struct WordManager {
             return (state_words[index] & mask) != 0 ? (result = true) : false;
         });
         return result;
+    }
+
+    /// Every page of the region CPU-modified, and none GPU-modified or Preflushable (the raw bits,
+    /// Untracked not masked out): its host contents are all stale (BufferCache::JoinOverlap).
+    [[nodiscard]] bool IsRegionWhollyCpuModified(u64 offset, u64 size) const noexcept {
+        const std::span<const u64> cpu_words = Span(Type::CPU);
+        const std::span<const u64> gpu_words = Span(Type::GPU);
+        const std::span<const u64> preflush_words = Span(Type::Preflushable);
+        bool whole = true;
+        IterateWords(offset, size, [&](size_t index, u64 mask) {
+            if ((cpu_words[index] & mask) != mask || (gpu_words[index] & mask) != 0 ||
+                (preflush_words[index] & mask) != 0) {
+                whole = false;
+                return true;
+            }
+            return false;
+        });
+        return whole;
     }
 
     /// @brief Returns a begin end pair with the inclusive modified region

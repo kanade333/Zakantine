@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <variant>
 #include <vector>
@@ -105,6 +106,12 @@ public:
         *(payload_cursor++) = texel_buffer;
     }
 
+    /// Adds entries recorded from an earlier payload (a pipeline's remembered texture bindings,
+    /// EDEN_NX2_EXP32; from zortos293/Lichii#717).
+    void AddEntries(const DescriptorUpdateEntry* entries, size_t count) {
+        payload_cursor = std::copy_n(entries, count, payload_cursor);
+    }
+
     void AddTexelBuffer(VkBufferView texel_buffer, VkDeviceAddress base_address,
                         VkDeviceSize offset, VkDeviceSize size, VkFormat format) {
         if (!use_descriptor_buffer) {
@@ -120,7 +127,8 @@ public:
 
 private:
     const Device& device;
-    const size_t frame_payload_size;
+    size_t frame_payload_size;
+    const size_t maximum_frame_payload_size;
     const bool supports_descriptor_buffer;
     bool use_descriptor_buffer{false};
     size_t frame_index{0};
@@ -128,6 +136,8 @@ private:
     DescriptorUpdateEntry* payload_start = nullptr;
     const DescriptorUpdateEntry* upload_start = nullptr;
     std::unique_ptr<DescriptorUpdateEntry[]> payload;
+    bool growth_disabled{};
+    bool fallback_reported{};
 };
 
 // TODO: should these be separate classes instead?

@@ -8,6 +8,8 @@
 
 #include <cstddef>
 #include <optional>
+#include <span>
+#include <string>
 
 #include <boost/container/small_vector.hpp>
 
@@ -242,21 +244,66 @@ public:
         });
     }
 
-    vk::PipelineLayout CreatePipelineLayout(VkDescriptorSetLayout descriptor_set_layout) const {
+    VkPushConstantRange PushConstantRange() const {
         using Shader::Backend::SPIRV::RenderAreaLayout;
         using Shader::Backend::SPIRV::RescalingLayout;
         const u32 size_offset = is_compute ? sizeof(RescalingLayout::down_factor) : 0u;
-        const VkPushConstantRange range{
+        return VkPushConstantRange{
             .stageFlags = static_cast<VkShaderStageFlags>(
                 is_compute ? VK_SHADER_STAGE_COMPUTE_BIT
-                           : (uses_mesh ? VK_SHADER_STAGE_ALL_GRAPHICS |
-                                              VK_SHADER_STAGE_TASK_BIT_EXT |
-                                              VK_SHADER_STAGE_MESH_BIT_EXT
-                                        : VK_SHADER_STAGE_ALL_GRAPHICS)),
+                : mesh_emulation
+                    ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT
+                    : (uses_mesh ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT |
+                                       VK_SHADER_STAGE_MESH_BIT_EXT
+                                 : VK_SHADER_STAGE_ALL_GRAPHICS)),
             .offset = 0,
             .size = static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
                     static_cast<u32>(sizeof(RenderAreaLayout)),
         };
+    }
+
+    /// Graphics pipeline libraries (EDEN_NX2_GPL): one set per stage, set index = stage index,
+    /// null where the stage has no descriptors or is not part of the library.
+    vk::PipelineLayout CreateIndependentPipelineLayout(
+        std::span<const VkDescriptorSetLayout> set_layouts, bool independent_sets) const {
+        const VkPushConstantRange range{PushConstantRange()};
+        return device->GetLogical().CreatePipelineLayout({
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = independent_sets ? static_cast<VkPipelineLayoutCreateFlags>(
+                                            VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT)
+                                      : VkPipelineLayoutCreateFlags{},
+            .setLayoutCount = static_cast<u32>(set_layouts.size()),
+            .pSetLayouts = set_layouts.data(),
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &range,
+        });
+    }
+
+    /// What CreateDescriptorSetLayout(false) is made of: two layouts with the same signature are
+    /// identically defined (a library's set layout and the linked pipeline's one).
+    std::string SetLayoutSignature() const {
+        std::string signature;
+        const auto add = [&signature](u32 value) {
+            signature.append(reinterpret_cast<const char*>(&value), sizeof(value));
+        };
+        add(device->IsDescriptorBindingPartiallyBoundSupported() ? 1u : 0u);
+        add(static_cast<u32>(bindings.size()));
+        for (const VkDescriptorSetLayoutBinding& entry : bindings) {
+            add(entry.binding);
+            add(static_cast<u32>(entry.descriptorType));
+            add(entry.descriptorCount);
+            add(static_cast<u32>(entry.stageFlags));
+        }
+        return signature;
+    }
+
+    [[nodiscard]] bool Empty() const noexcept {
+        return bindings.empty();
+    }
+
+    vk::PipelineLayout CreatePipelineLayout(VkDescriptorSetLayout descriptor_set_layout) const {
+        const VkPushConstantRange range{PushConstantRange()};
         return device->GetLogical().CreatePipelineLayout({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = nullptr,
@@ -268,8 +315,37 @@ public:
         });
     }
 
+    /// Mesh emulation: a graphics pipeline layout whose mesh program runs as a compute shader
+    /// (its bindings carry VK_SHADER_STAGE_COMPUTE_BIT and so does the push constant range).
+    void EnableMeshEmulation() noexcept {
+        mesh_emulation = true;
+    }
+
+    /// Mesh emulation: the output storage buffer the compute shader writes and the vertex
+    /// shader reads, at an explicit binding (after every program's bindings).
+    void AddMeshEmulationOutput(u32 output_binding) {
+        bindings.push_back({
+            .binding = output_binding,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        });
+        entries.push_back({
+            .dstBinding = output_binding,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .offset = offset,
+            .stride = sizeof(DescriptorUpdateEntry),
+        });
+        binding = (std::max)(binding, output_binding + 1);
+        ++num_descriptors;
+        offset += sizeof(DescriptorUpdateEntry);
+    }
+
     void Add(const Shader::Info& info, VkShaderStageFlags stage) {
-        is_compute |= (stage & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+        is_compute |= (stage & VK_SHADER_STAGE_COMPUTE_BIT) != 0 && !mesh_emulation;
         uses_mesh |= (stage & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) != 0;
 
         Add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, stage, info.constant_buffer_descriptors);
@@ -309,6 +385,7 @@ private:
     const Device* device{};
     bool is_compute{};
     bool uses_mesh{};
+    bool mesh_emulation{};
     boost::container::small_vector<VkDescriptorSetLayoutBinding, 32> bindings;
     boost::container::small_vector<VkDescriptorUpdateTemplateEntry, 32> entries;
     u32 binding{};
@@ -338,6 +415,16 @@ public:
         }
     }
 
+    /// Graphics pipeline libraries: the next texture and image bits are these (the fragment stage
+    /// starts at fixed ones, GPL_FRAGMENT_*_SCALING_BASE).
+    void Seek(u32 texture_index, u32 image_index) noexcept {
+        texture_ptr = words.data() + texture_index / 32;
+        texture_bit = 1u << (texture_index % 32);
+        image_ptr = words.data() + Shader::Backend::SPIRV::NUM_TEXTURE_SCALING_WORDS +
+                    image_index / 32;
+        image_bit = 1u << (image_index % 32);
+    }
+
     const std::array<u32, NUM_TEXTURE_AND_IMAGE_SCALING_WORDS>& Data() const noexcept {
         return words;
     }
@@ -356,11 +443,14 @@ public:
     std::array<f32, 4> words{};
 };
 
+/// `texture_rescaled`: when given, each texture descriptor's rescaling bit is also stored at
+/// *texture_rescaled, which advances (EDEN_NX2_EXP32 records them with the descriptors).
 inline void PushImageDescriptors(TextureCache& texture_cache,
                                  GuestDescriptorQueue& guest_descriptor_queue,
                                  const Shader::Info& info, RescalingPushConstant& rescaling,
                                  const VideoCommon::SamplerId*& samplers,
-                                 const VideoCommon::ImageViewInOut*& views) {
+                                 const VideoCommon::ImageViewInOut*& views,
+                                 u8** texture_rescaled = nullptr) {
     const u32 num_texture_buffers = Shader::NumDescriptors(info.texture_buffer_descriptors);
     const u32 num_image_buffers = Shader::NumDescriptors(info.image_buffer_descriptors);
     views += num_texture_buffers;
@@ -383,6 +473,9 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
             is_rescaled |= element_rescaled;
         }
         rescaling.PushTexture(is_rescaled);
+        if (texture_rescaled != nullptr) {
+            *((*texture_rescaled)++) = is_rescaled ? 1 : 0;
+        }
     }
     for (const auto& desc : info.image_descriptors) {
         bool is_rescaled{};

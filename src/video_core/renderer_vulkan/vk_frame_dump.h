@@ -62,6 +62,8 @@ public:
         VkBuffer host;
         u32 host_offset;
         std::vector<u8> guest;
+        /// EDEN_NX2_FRAME_DUMP_HOST: also read the host buffer the draw reads ("host_copy").
+        bool also_host{};
     };
 
     explicit FrameDump(const Device& device, MemoryAllocator& memory_allocator,
@@ -177,6 +179,7 @@ private:
     void Write(const Job& job);
     void WriteBuffer(const Job& job);
     void WriteFile(const std::string& name, std::span<const u8> data);
+    void Rearm();
 
     const Device& device;
     MemoryAllocator& memory_allocator;
@@ -193,7 +196,12 @@ private:
     bool truncated{};
     std::filesystem::path directory;
     std::filesystem::path trigger_file;
+    std::filesystem::path base_directory;
+    u32 captures{};
     u64 trigger_frame{~0ULL};
+    /// EDEN_NX2_FRAME_DUMP_PAIR: each file-triggered capture is followed by one of the next frame.
+    bool pair{};
+    bool pair_next{};
     double trigger_seconds{};
     std::chrono::steady_clock::time_point start;
     u64 frame{};

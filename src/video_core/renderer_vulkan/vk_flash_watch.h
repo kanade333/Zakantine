@@ -16,8 +16,9 @@
 #include <vector>
 
 #include "common/common_types.h"
-#include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+// Before the Vulkan headers: on Linux they pull in X11, whose Success macro breaks NvResult.
 #include "video_core/surface.h"
+#include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -159,6 +160,9 @@ private:
     std::deque<Frame> history;
     u64 checked{};
     u64 flashes{};
+    /// Frames brighter than both neighbours in a presented tile (flicker, every other frame).
+    u64 alternating{};
+    u64 alternating_window{};
     u32 reports{};
 
     std::thread worker;

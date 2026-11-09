@@ -64,6 +64,7 @@ SETTING(std::string, false);
 SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
+SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -203,8 +204,9 @@ struct Values {
 
     // Core
     SwitchableSetting<bool> use_multi_core{linkage, true, "use_multi_core", Category::Core};
+    // 8 GB: Ocarina of Time's own memory size (the Frizti builds are tuned for it).
     SwitchableSetting<MemoryLayout, true> memory_layout_mode{linkage,
-                                                             MemoryLayout::Memory_4Gb,
+                                                             MemoryLayout::Memory_8Gb,
                                                              "memory_layout_mode",
                                                              Category::Core,
                                                              Specialization::Default,
@@ -349,8 +351,9 @@ struct Values {
     SwitchableSetting<ResolutionSetup> resolution_setup{linkage, ResolutionSetup::Res1X,
                                                         "resolution_setup", Category::Renderer};
 
+    // Mailbox: the host frame pacer (vk_host_pacer.h) times presents to the display itself.
     SwitchableSetting<VSyncMode, true> vsync_mode{linkage,
-                                                  VSyncMode::Fifo,
+                                                  VSyncMode::Mailbox,
                                                   "use_vsync",
                                                   Category::Renderer,
                                                   Specialization::RuntimeList,
@@ -382,8 +385,15 @@ struct Values {
                                                            Specialization::Percentage,
                                                        true,
                                                        true};
-    // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
-    SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS. Global only: a per-game
+    // value (left in some players' OoT configs) silently overrode the checkbox, which then showed
+    // unchecked and greyed once the game ran (2026-11-09, an RTX 5080 player).
+    Setting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // The DLSS model (preset) for every mode: K by default (NVIDIA's defaults for Performance and
+    // Ultra Performance drew thin lines); Default leaves the choice to NVIDIA. EDEN_NX2_DLSS_PRESET
+    // still overrides it.
+    Setting<DlssPreset> nvidia_dlss_preset{linkage, DlssPreset::K, "nvidia_dlss_preset",
+                                           Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -399,6 +409,10 @@ struct Values {
                                                   Specialization::Default,
                                                   true,
                                                   true};
+    // The Legend of Zelda: Ocarina of Time's own anti-aliasing network and its sharpening output
+    // pass, or the tonemapped image as the game renders it (video_core/oot_network.h).
+    SwitchableSetting<OotAntiAliasing> oot_anti_aliasing{linkage, OotAntiAliasing::Game,
+                                                         "oot_anti_aliasing", Category::Renderer};
 
     SwitchableSetting<std::string> post_shader_chain{linkage,
                                                      std::string(),
@@ -519,6 +533,8 @@ struct Values {
     // Zakantine: Low ("Fast") everywhere. High keeps the split GPU thread off, the largest
     // single slowdown on Switch 2 titles (Ocarina of Time: 25.8 -> 28.2 FPS from this alone).
     SwitchableSetting<GpuAccuracy, true> gpu_accuracy{linkage,
+                                                      // Low on desktop too: the Frizti builds are
+                                                      // tuned for Ocarina of Time there.
                                                       GpuAccuracy::Low,
                                                       "gpu_accuracy",
                                                       Category::RendererAdvanced,
@@ -546,11 +562,28 @@ struct Values {
                                                                  true,
                                                                  true};
 
+    // How much of a native (Switch 2) compute program's storage binding a dispatch marks
+    // GPU-written. Its pointer carries no size, so the binding is up to 8 MiB; marking all of it
+    // defers the CPU's later writes to those pages (Ocarina of Time's white leaves) and has fences
+    // copy them back. Auto: the extent the shader's stores provably reach (the whole binding when
+    // unknown). Full: the whole binding (the behaviour before the store extent). Cap64K: at most
+    // 64 KiB.
+    SwitchableSetting<NativeComputeWriteMark, true> native_compute_write_mark{
+        linkage,
+        NativeComputeWriteMark::Auto,
+        "native_compute_write_mark",
+        Category::RendererAdvanced,
+        Specialization::Default,
+        true,
+        true};
+
     SwitchableSetting<VramUsageMode, true> vram_usage_mode{linkage,
                                                            VramUsageMode::Conservative,
                                                            "vram_usage_mode",
                                                            Category::RendererAdvanced};
 
+    // GPU: Ocarina's cutscene videos.
+    // Zakantine: CPU, as the player's measured config has it (Fritchii: GPU).
     SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Cpu,
                                                       "nvdec_emulation", Category::RendererAdvanced};
 
@@ -603,11 +636,38 @@ struct Values {
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
 
+    // Graphics pipeline libraries (VK_EXT_graphics_pipeline_library): pipelines linked from
+    // per-stage shader libraries, on NVIDIA and AMD GPUs. EDEN_NX2_GPL=1 turns them on for any
+    // GPU, EDEN_NX2_GPL=0 off.
+    SwitchableSetting<bool> use_graphics_pipeline_library{
+        linkage, true, "use_graphics_pipeline_library", Category::RendererAdvanced};
+
+    // Threads of the shader warm-up (compute and graphics, each). EDEN_NX2_WARM_THREADS overrides.
+    SwitchableSetting<u32, true> shader_warm_threads{linkage,
+                                                     4,
+                                                     1,
+                                                     32,
+                                                     "shader_warm_threads",
+                                                     Category::RendererAdvanced,
+                                                     Specialization::Countable,
+                                                     true,
+                                                     true};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_video_framerate{linkage, false, "use_video_framerate",
                                                 Category::RendererAdvanced};
+
+    // Ocarina of Time: present at 30 fps for lower-end PCs (nx2_gsv.h PaceToVblank). The game's
+    // timing follows real time (Dynamic FPS by Dark), so it keeps full speed. Asked once at the
+    // first launch (oot_fps_asked).
+    SwitchableSetting<bool> oot_30fps{linkage, false, "oot_30fps", Category::RendererAdvanced};
+    Setting<bool> oot_fps_asked{linkage, false, "oot_fps_asked", Category::RendererAdvanced};
+    // Which revision of the Frizti tuned settings (common/frizti_settings.h) this config has had
+    // applied once (MainWindow::MigrateFriztiSettings; config/frizti.ini keeps it too).
+    Setting<u32> frizti_settings_revision{linkage, 0, "frizti_settings_revision",
+                                          Category::RendererAdvanced};
 
     // Mario Kart World: select a fixed or dynamic in-game frame-rate mode (loader/nso.cpp).
     SwitchableSetting<bool> mkw_30fps{linkage, false, "mkw_30fps", Category::RendererAdvanced};
@@ -776,6 +836,8 @@ struct Values {
 
     Setting<s32> current_user{linkage, 0, "current_user", Category::System};
 
+    // Docked: the docked rendering resolution (as Ocarina of Time on a TV).
+    // Zakantine: Handheld, as the player's measured config has it (Fritchii: Docked).
     SwitchableSetting<ConsoleMode> use_docked_mode{linkage,
                                                    ConsoleMode::Handheld,
                                                    "use_docked_mode",
@@ -967,6 +1029,9 @@ extern Values values;
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;
 
+/// Whether frame generation runs: the setting, and never in Fritchii builds, which hide its
+/// settings (a value left on by an older build made the camera flicker, 2026-11-09).
+[[nodiscard]] bool FrameGenActive();
 [[nodiscard]] u32 FrameGenMultiplier();
 
 [[nodiscard]] size_t FrameGenGenerations();

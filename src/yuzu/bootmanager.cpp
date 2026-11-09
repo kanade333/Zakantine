@@ -48,6 +48,7 @@
 #include <QOpenGLContext>
 #endif
 
+#include "common/build_family.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/settings_input.h"
@@ -119,10 +120,11 @@ struct NullRenderWidget : public RenderWidget {
 GRenderWindow::GRenderWindow(MainWindow* parent,
                              std::shared_ptr<InputCommon::InputSubsystem> input_subsystem_)
     : QWidget(parent), input_subsystem{std::move(input_subsystem_)} {
-    if (std::string_view{Common::g_build_version}.starts_with("Frizti v")) {
-        setWindowTitle(QStringLiteral("Zakantine %1").arg(QString::fromUtf8(Common::g_build_version)));
+    if (Common::IsFritchiiFamily()) {
+        setWindowTitle(QStringLiteral("%1 %2").arg(QString::fromUtf8(Common::g_build_name),
+                                                   QString::fromUtf8(Common::g_build_version)));
     } else {
-        setWindowTitle(QStringLiteral("Zakantine %1 | %2-%3")
+        setWindowTitle(QStringLiteral("Lichii %1 | %2-%3")
                            .arg(QString::fromUtf8(Common::g_build_name),
                                 QString::fromUtf8(Common::g_scm_branch),
                                 QString::fromUtf8(Common::g_scm_desc)));

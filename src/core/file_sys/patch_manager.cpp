@@ -8,6 +8,7 @@
 #include <span>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/assert.h"
@@ -61,6 +62,12 @@ struct BuiltinPatch {
     std::string_view module;
     std::string_view build_id;
     std::span<const BuiltinPatchRecord> records;
+    /// When set, the patch applies only while this environment variable is 1 (A/B before it
+    /// becomes a default).
+    const char* enable_env = nullptr;
+    /// When set, this environment variable at 1 skips the patch and at 0 applies it even when
+    /// Add-Ons has it off (A/B runs without touching the player's Add-Ons).
+    const char* disable_env = nullptr;
 };
 
 // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
@@ -94,6 +101,36 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{.module_offset = 0x3C46200, .bytes = DYNAMIC_FPS_ROUTINE},
 };
 
+// Occlusion Off (cLohan's community patch, from zortos293/Lichii#641): the game creates no
+// z-prepass occlusion queries and no samples-passed queries (ldrb w8, [x0] -> mov w8, wzr), so it
+// issues no occlusion reports and no conditional renders; every candidate object is drawn.
+constexpr std::array<u8, 4> MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
+constexpr u32 LDRB_W8_X0 = 0x39400008;
+constexpr std::array OCCLUSION_OFF_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0x11ACE68, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
+    BuiltinPatchRecord{.module_offset = 0x11B828C, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
+    BuiltinPatchRecord{.module_offset = 0x11B82A4, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
+    BuiltinPatchRecord{.module_offset = 0x11ACEC8, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
+    BuiltinPatchRecord{.module_offset = 0x11B82DC, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
+    BuiltinPatchRecord{.module_offset = 0x11B82F4, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
+};
+
+// Resource poll backoff (zortos293/Lichii#641): the resource request thread (main+0xF7A0)
+// rescans its pending requests at once when one is not ready (`tbz w8, #0, loop` at main+0x14ABC,
+// w8 = "all done"). That branch now goes through the zero padding at main+0x17088: `svc #0xf3`
+// (a short sleep while EXP25 is on, core/hle/kernel/svc/svc_nx2_oot_poll.cpp) and `b loop`.
+constexpr std::array<u8, 4> POLL_RESCAN_BRANCH{0x68, 0x2E, 0x01, 0x36};  // tbz w8, #0, 0x17088
+constexpr std::array<u8, 4> POLL_BACKOFF_SVC{0x61, 0x1E, 0x00, 0xD4};    // svc #0xf3
+constexpr std::array<u8, 4> POLL_BACKOFF_RETURN{0x0D, 0xE2, 0xFF, 0x17}; // b 0xf8c0
+constexpr std::array POLL_BACKOFF_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0x14ABC,
+                       .bytes = POLL_RESCAN_BRANCH,
+                       .checked = true,
+                       .original = 0x36057028}, // tbz w8, #0, 0xf8c0
+    BuiltinPatchRecord{.module_offset = 0x17088, .bytes = POLL_BACKOFF_SVC, .checked = true, .original = 0},
+    BuiltinPatchRecord{.module_offset = 0x1708C, .bytes = POLL_BACKOFF_RETURN, .checked = true, .original = 0},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     BuiltinPatch{
         .name = "Max Resolution (built-in)",
@@ -101,6 +138,7 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = MAX_RESOLUTION_RECORDS,
+        .disable_env = "EDEN_NX2_NO_MAX_RES",
     },
     BuiltinPatch{
         .name = "Dynamic FPS by Dark (built-in)",
@@ -108,6 +146,22 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = DYNAMIC_FPS_RECORDS,
+    },
+    BuiltinPatch{
+        .name = "Occlusion Off (built-in, EDEN_NX2_OCCLUSION_OFF=1)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = OCCLUSION_OFF_RECORDS,
+        .enable_env = "EDEN_NX2_OCCLUSION_OFF",
+    },
+    BuiltinPatch{
+        .name = "Resource poll backoff (built-in, EDEN_NX2_OOT_POLL_BACKOFF=1)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = POLL_BACKOFF_RECORDS,
+        .enable_env = "EDEN_NX2_OOT_POLL_BACKOFF",
     },
 };
 
@@ -398,7 +452,10 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     const auto load_dir = GetModificationLoadRoot();
     const auto sdmc_load_dir = GetModificationLoadRoot(true);
 
-    std::vector<VirtualDir> patch_dirs = {sdmc_load_dir};
+    std::vector<VirtualDir> patch_dirs;
+    if (sdmc_load_dir != nullptr) {
+        patch_dirs.push_back(sdmc_load_dir);
+    }
     if (load_dir != nullptr) {
         const auto load_patch_dirs = load_dir->GetSubdirectories();
         patch_dirs.insert(patch_dirs.end(), load_patch_dirs.begin(), load_patch_dirs.end());
@@ -531,7 +588,21 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (patch.title_id != title_id || patch.module != name) {
             continue;
         }
-        if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
+        if (patch.enable_env != nullptr) {
+            const char* const value = std::getenv(patch.enable_env);
+            if (value == nullptr || std::string_view{value} != "1") {
+                continue;
+            }
+        }
+        // disable_env=1 skips the patch, =0 applies it even when Add-Ons has it off (A/B runs).
+        const char* const ab_value = patch.disable_env ? std::getenv(patch.disable_env) : nullptr;
+        const std::string_view ab{ab_value ? ab_value : ""};
+        if (ab == "1") {
+            LOG_INFO(Loader, "    - Skipping \"{}\": {}=1", patch.name, patch.disable_env);
+            continue;
+        }
+        if (ab != "0" &&
+            std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
             LOG_INFO(Loader, "    - Skipping \"{}\": disabled in Add-Ons", patch.name);
             continue;
         }
@@ -669,8 +740,12 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     }
 
     const auto disabled = GetDisabledAddons();
-    std::vector<VirtualDir> patch_dirs = load_dir->GetSubdirectories();
-    if (std::find(disabled.cbegin(), disabled.cend(), "SDMC") == disabled.cend()) {
+    std::vector<VirtualDir> patch_dirs;
+    if (load_dir != nullptr) {
+        patch_dirs = load_dir->GetSubdirectories();
+    }
+    if (std::find(disabled.cbegin(), disabled.cend(), "SDMC") == disabled.cend() &&
+        sdmc_load_dir != nullptr) {
         patch_dirs.push_back(sdmc_load_dir);
     }
     std::sort(patch_dirs.begin(), patch_dirs.end(),
@@ -1137,7 +1212,10 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id) {
+        if (patch.title_id != title_id ||
+            (patch.enable_env != nullptr &&
+             std::string_view{std::getenv(patch.enable_env) ? std::getenv(patch.enable_env) : ""} !=
+                 "1")) {
             continue;
         }
         const auto patch_disabled =
